@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+runtime/models/*
+!runtime/models/.gitkeep
+runtime/wheels/*
+!runtime/wheels/.gitkeep
+runtime/logs/
+runtime/temp/*
+!runtime/temp/.gitkeep
