@@ -38,8 +38,18 @@ class TextChangeSegmenter:
             self._start_segment(timestamp_ms, normalized_text, confidence)
             return closed
 
+        # Umbral adaptativo: confianza alta → más flexible (acepta variaciones OCR menores)
+        # confianza baja → más estricto (evita que ruido rompa el segmento activo)
+        conf_value = self._sanitize_confidence(confidence)
+        if conf_value >= 0.85:
+            effective_threshold = max(0.70, self.similarity_threshold - 0.14)
+        elif 0.0 < conf_value < 0.60:
+            effective_threshold = min(0.92, self.similarity_threshold + 0.08)
+        else:
+            effective_threshold = self.similarity_threshold
+
         matched_variant, similarity = self._find_closest_variant(normalized_text)
-        if matched_variant is not None and similarity >= self.similarity_threshold:
+        if matched_variant is not None and similarity >= effective_threshold:
             self._register_variant(normalized_text, confidence)
             self.current_text = self._choose_canonical_variant()
             self.last_timestamp_ms = timestamp_ms

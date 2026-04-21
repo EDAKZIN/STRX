@@ -119,7 +119,7 @@ class OcrWorker(QThread):
         self._cancel_requested = True
 
     def _recalculate_track_ttl(self) -> None:
-        grace_window_ms = 450
+        grace_window_ms = 600
         self._track_ttl_steps = max(1, int(round(grace_window_ms / max(1, self._sample_interval_ms))))
 
     def _update_frame_context(self, frame: object) -> None:
@@ -966,6 +966,11 @@ class OcrWorker(QThread):
         visible_len = max(1, len(normalized.replace(" ", "")))
         if (symbols / visible_len) > 0.28:
             return True
+        # Filtro fonético: alucinaciones del OCR suelen carecer de vocales
+        if letters >= 4:
+            vowels = sum(1 for c in normalized.lower() if c in "aeiou")
+            if vowels / letters < 0.15:
+                return True
         if OcrWorker._text_quality_score(normalized, confidence) < 3.0:
             return True
         return False
@@ -980,6 +985,10 @@ class OcrWorker(QThread):
             return False
 
         if word_count >= 2:
+            # Filtro reforzado contra basura en FPS altos
+            if segment.confidence is not None and segment.confidence < 0.70:
+                if duration_ms < 500:
+                    return False
             return True
         if word_count == 0:
             return False

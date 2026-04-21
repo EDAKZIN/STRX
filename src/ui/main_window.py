@@ -4,6 +4,7 @@ import os
 import platform
 import subprocess
 from pathlib import Path
+from difflib import SequenceMatcher
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QUrl
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -380,8 +381,33 @@ class MainWindow(QMainWindow):
         self.update_action_buttons()
 
     def on_segment_found(self, segment: SubtitleSegment) -> None:
-        self.segments[segment.id] = segment
-        self.append_process_row(segment)
+        merged = False
+        for existing_segment in list(self.segments.values()):
+            similarity = SequenceMatcher(None, existing_segment.text.lower(), segment.text.lower()).ratio()
+            if similarity >= 0.75:
+                gap1 = segment.start_ms - existing_segment.end_ms
+                gap2 = existing_segment.start_ms - segment.end_ms
+                if (0 <= gap1 <= 400) or (0 <= gap2 <= 400) or (gap1 < 0 and gap2 < 0):
+                    existing_segment.start_ms = min(existing_segment.start_ms, segment.start_ms)
+                    existing_segment.end_ms = max(existing_segment.end_ms, segment.end_ms)
+                    if segment.confidence is not None:
+                        if existing_segment.confidence is None:
+                            existing_segment.confidence = segment.confidence
+                        else:
+                            existing_segment.confidence = max(existing_segment.confidence, segment.confidence)
+                    merged = True
+                    try:
+                        row = self.process_row_segment_ids.index(existing_segment.id)
+                        self.process_table.item(row, 1).setText(format_timecode(existing_segment.start_ms))
+                        self.process_table.item(row, 2).setText(format_timecode(existing_segment.end_ms))
+                    except ValueError:
+                        pass
+                    break
+                    
+        if not merged:
+            self.segments[segment.id] = segment
+            self.append_process_row(segment)
+            
         self.refresh_table()
         self.refresh_timeline()
         self.update_subtitle_overlay(self.media_player.position())
