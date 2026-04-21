@@ -166,13 +166,20 @@ class MainWindow(QMainWindow):
         video_container_layout.setContentsMargins(0, 0, 0, 0)
         video_container_layout.addWidget(self.video_widget)
 
-        # Marco de selección como widget FLOTANTE (sin padre) para aparecer sobre el video
-        # Esto es necesario porque QVideoWidget en Qt6 rendering por encima de todo
-        self.region_selection_band = QLabel(self)
+        # Tool window flotante sobre el rendering DirectX del QVideoWidget
+        self.region_selection_band = QLabel()
         self.region_selection_band.setObjectName("selectionFrame")
+        self.region_selection_band.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        )
+        self.region_selection_band.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.region_selection_band.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.region_selection_band.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.region_selection_band.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.region_selection_band.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.region_selection_band.setAutoFillBackground(False)
+        self.region_selection_band.setStyleSheet(
+            "border: 2px solid #0ea5e9; border-radius: 3px; background: transparent;"
+        )
         self.region_selection_band.hide()
         self._layout_video_overlay()
 
@@ -264,6 +271,7 @@ class MainWindow(QMainWindow):
         self.media_player.durationChanged.connect(self.on_player_duration_changed)
         if self.video_sink is not None:
             self.video_sink.videoFrameChanged.connect(self.on_video_frame_changed)
+        self.content_stack.currentChanged.connect(self._on_page_changed)
 
     def open_video(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
@@ -580,8 +588,19 @@ class MainWindow(QMainWindow):
         self.content_stack.setCurrentIndex(0)
         self.btn_view_process.setVisible(True)
         self.btn_back_editor.setVisible(False)
-        # Restaurar el marco si corresponde
         self._sync_region_selection_band()
+
+    def _on_page_changed(self, index: int) -> None:
+        if index == 0:
+            self._sync_region_selection_band()
+        else:
+            self.region_selection_band.hide()
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.windowState() & Qt.WindowState.WindowMinimized:
+                self.region_selection_band.hide()
 
     def clear_process_table(self) -> None:
         self.process_table.setRowCount(0)
@@ -825,6 +844,9 @@ class MainWindow(QMainWindow):
         return QRect(QPoint(start_x, start_y), QPoint(end_x, end_y)).normalized().intersected(video_rect)
 
     def _sync_region_selection_band(self) -> None:
+        if hasattr(self, "content_stack") and self.content_stack.currentIndex() != 0:
+            self.region_selection_band.hide()
+            return
         if not self.btn_toggle_region.isChecked():
             self.region_selection_band.hide()
             return
@@ -849,15 +871,12 @@ class MainWindow(QMainWindow):
             self.region_selection_band.hide()
             return
             
-        # Convertir coordenadas locales del video_widget a coordenadas globales de pantalla
-        # Para el widget flotante, necesitamos posicionarla correctamente
-        global_pos = self.video_widget.mapToGlobal(rect_to_show.topLeft())
-        global_rect = QRect(global_pos, rect_to_show.size())
-        
         self.region_selection_band.setStyleSheet(
             "border: 2px solid #0ea5e9; border-radius: 3px; background: transparent;"
         )
-        self.region_selection_band.setGeometry(global_rect)
+        # Coordenadas globales para la Tool window flotante
+        global_pos = self.video_widget.mapToGlobal(rect_to_show.topLeft())
+        self.region_selection_band.setGeometry(QRect(global_pos, rect_to_show.size()))
         self.region_selection_band.show()
         self.region_selection_band.raise_()
 
@@ -933,16 +952,15 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _show_disabled_frame(self) -> None:
-        """Muestra un marco deshabilitado cuando el mouse está fuera del área de video"""
         video_rect = self._video_display_rect()
         if video_rect.isEmpty():
             return
-        # Convertir a coordenadas globales
         global_pos = self.video_widget.mapToGlobal(video_rect.topLeft())
-        global_rect = QRect(global_pos, video_rect.size())
-        self.region_selection_band.setGeometry(global_rect)
+        self.region_selection_band.setGeometry(QRect(global_pos, video_rect.size()))
         self.region_selection_band.setProperty("disabled", True)
-        self.region_selection_band.setStyleSheet("border: 2px dashed #6b7280; background: transparent;")
+        self.region_selection_band.setStyleSheet(
+            "border: 2px dashed #38bdf8; border-radius: 3px; background: transparent;"
+        )
         self.region_selection_band.show()
         self.region_selection_band.raise_()
 
