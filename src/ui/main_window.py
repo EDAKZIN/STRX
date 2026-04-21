@@ -267,6 +267,9 @@ class MainWindow(QMainWindow):
         self.timeline.segment_selected.connect(self.on_timeline_segment_selected)
         self.timeline.segment_changing.connect(self.on_timeline_segment_changing)
         self.timeline.segment_changed.connect(self.on_timeline_segment_changed)
+        self.timeline.seek_requested.connect(self.media_player.setPosition)
+        self.timeline.scrub_started.connect(self.on_timeline_scrub_started)
+        self.timeline.scrub_ended.connect(self.on_timeline_scrub_ended)
 
         self.media_player.positionChanged.connect(self.on_player_position_changed)
         self.media_player.durationChanged.connect(self.on_player_duration_changed)
@@ -544,6 +547,14 @@ class MainWindow(QMainWindow):
         self.refresh_timeline()
         self.timeline.select_segment(segment_id, emit_signal=False)
         self.update_subtitle_overlay(self.media_player.position())
+
+    def on_timeline_scrub_started(self) -> None:
+        self.was_playing_before_scrub = self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self.media_player.pause()
+
+    def on_timeline_scrub_ended(self) -> None:
+        if getattr(self, "was_playing_before_scrub", False):
+            self.media_player.play()
 
     def update_single_row(self, segment_id: str) -> None:
         row = self.segment_row_index.get(segment_id)

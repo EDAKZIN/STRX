@@ -126,6 +126,9 @@ class TimelineWidget(QGraphicsView):
     segment_selected = pyqtSignal(str)
     segment_changing = pyqtSignal(str, int, int)
     segment_changed = pyqtSignal(str, int, int)
+    seek_requested = pyqtSignal(int)
+    scrub_started = pyqtSignal()
+    scrub_ended = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -212,6 +215,38 @@ class TimelineWidget(QGraphicsView):
 
     def lane_to_y(self, lane_index: int) -> float:
         return self.top_padding + (lane_index * (self.lane_height + self.lane_gap))
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.pos())
+            # Si no hicimos clic en un segmento (o su texto), iniciamos el scrubbing.
+            if not isinstance(item, TimelineSegmentItem) and not getattr(item, "parentItem", lambda: None)().__class__ is TimelineSegmentItem:
+                self._is_scrubbing = True
+                self.scrub_started.emit()
+                scene_pos = self.mapToScene(event.pos())
+                if scene_pos.x() >= 0:
+                    ms = int((scene_pos.x() / self.px_per_second) * 1000)
+                    self.seek_requested.emit(ms)
+                # No llamamos a super() aquí para evitar que QGraphicsView inicie el ScrollHandDrag y robe el drag.
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if getattr(self, "_is_scrubbing", False):
+            scene_pos = self.mapToScene(event.pos())
+            if scene_pos.x() >= 0:
+                ms = int((scene_pos.x() / self.px_per_second) * 1000)
+                self.seek_requested.emit(ms)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if getattr(self, "_is_scrubbing", False):
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._is_scrubbing = False
+                self.scrub_ended.emit()
+            return
+        super().mouseReleaseEvent(event)
 
     def _rebuild(self) -> None:
         self.scene.clear()
