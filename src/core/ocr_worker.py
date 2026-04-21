@@ -88,6 +88,7 @@ class OcrWorker(QThread):
         model_paths: dict[str, Path],
         enable_language_correction: bool = False,
         use_gpu: bool = True,
+        crop_region_norm: tuple[float, float, float, float] | None = None,
     ) -> None:
         super().__init__()
         self.video_path = video_path
@@ -96,15 +97,34 @@ class OcrWorker(QThread):
         self.language_code = "en"
         self.enable_language_correction = enable_language_correction
         self.use_gpu = use_gpu
+        self.crop_region_norm = self._normalize_crop_region(crop_region_norm)
         self._cancel_requested = False
         self._cv2 = None
         self._tracks: dict[str, TrackState] = {}
         self._track_counter = 0
-        self._track_ttl_steps = 2
         self._sample_interval_ms = max(1, int(round(1000.0 / self.sample_fps)))
+        self._track_ttl_steps = 1
+        self._frame_width = 0.0
+        self._frame_height = 0.0
+        self._recalculate_track_ttl()
 
     def cancel(self) -> None:
         self._cancel_requested = True
+
+    def _recalculate_track_ttl(self) -> None:
+        grace_window_ms = 450
+        self._track_ttl_steps = max(1, int(round(grace_window_ms / max(1, self._sample_interval_ms))))
+
+    def _update_frame_context(self, frame: object) -> None:
+        shape = getattr(frame, "shape", None)
+        if not shape or len(shape) < 2:
+            return
+        self._frame_height = float(shape[0] or 0.0)
+        self._frame_width = float(shape[1] or 0.0)
+
+    def _estimate_close_timestamp(self, current_timestamp_ms: int, last_seen_ms: int) -> int:
+        trailing_padding = max(80, int(self._sample_interval_ms * 0.55))
+        return min(current_timestamp_ms, last_seen_ms + trailing_padding)
 
     def run(self) -> None:
         self.status.emit("Inicializando OCR...")
@@ -141,6 +161,7 @@ class OcrWorker(QThread):
 
         frame_step = max(int(round(fps / self.sample_fps)), 1)
         self._sample_interval_ms = max(1, int((frame_step / fps) * 1000))
+        self._recalculate_track_ttl()
         total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         last_timestamp_ms = 0
         frame_index = 0
@@ -151,6 +172,8 @@ class OcrWorker(QThread):
             self.status.emit("Procesando video con PaddleOCR en GPU...")
         else:
             self.status.emit("Procesando video con PaddleOCR en CPU...")
+        if self.crop_region_norm is not None:
+            self.status.emit("Recorte OCR activo. Se procesará solo el área seleccionada.")
 
         try:
             while not self._cancel_requested:
@@ -166,7 +189,11 @@ class OcrWorker(QThread):
                 last_timestamp_ms = timestamp_ms
 
                 frame_diagonal = self._frame_diagonal(frame)
-                detections = self._extract_detections(reader, frame)
+                self._update_frame_context(frame)
+                frame_for_ocr, offset_x, offset_y = self._build_crop_frame(frame)
+                detections = self._extract_detections(reader, frame_for_ocr)
+                if detections and (offset_x != 0 or offset_y != 0):
+                    detections = self._translate_detections(detections, offset_x, offset_y)
                 if corrector and detections:
                     detections = self._apply_correction(corrector, detections)
                 for closed_segment in self._update_tracks(timestamp_ms, detections, frame_diagonal):
@@ -178,7 +205,7 @@ class OcrWorker(QThread):
 
                 frame_index += 1
 
-            flush_end = last_timestamp_ms + int((frame_step / fps) * 1000)
+            flush_end = last_timestamp_ms + max(80, int(self._sample_interval_ms * 0.55))
             for closed_segment in self._flush_tracks(flush_end):
                 self.segment_found.emit(closed_segment)
 
@@ -262,7 +289,7 @@ class OcrWorker(QThread):
                 continue
             track.missed_steps += 1
             if track.missed_steps > self._track_ttl_steps:
-                close_timestamp = min(timestamp_ms, track.last_seen_ms + self._sample_interval_ms)
+                close_timestamp = self._estimate_close_timestamp(timestamp_ms, track.last_seen_ms)
                 for closed in track.segmenter.flush(close_timestamp):
                     segment = self._build_segment(closed, track.last_bbox, track.last_confidence)
                     if self._should_emit_segment(segment, track.segment_hits):
@@ -410,7 +437,8 @@ class OcrWorker(QThread):
         if filtered_base:
             deduped = self._deduplicate_detections(filtered_base, frame_diagonal)
             merged_lines = self._merge_line_detections(deduped)
-            return self._merge_bubble_detections(merged_lines)
+            merged_boxes = self._merge_box_detections(merged_lines)
+            return self._merge_bubble_detections(merged_boxes)
 
         for variant in self._build_full_frame_variants(frame):
             variant_detections = self._extract_paddleocr_detections(reader, variant)
@@ -418,9 +446,64 @@ class OcrWorker(QThread):
             if filtered_variant:
                 deduped = self._deduplicate_detections(filtered_variant, frame_diagonal)
                 merged_lines = self._merge_line_detections(deduped)
-                return self._merge_bubble_detections(merged_lines)
+                merged_boxes = self._merge_box_detections(merged_lines)
+                return self._merge_bubble_detections(merged_boxes)
 
         return []
+
+    def _build_crop_frame(self, frame: object) -> tuple[object, int, int]:
+        if self.crop_region_norm is None:
+            return frame, 0, 0
+        shape = getattr(frame, "shape", None)
+        if not shape or len(shape) < 2:
+            return frame, 0, 0
+
+        frame_height = int(shape[0] or 0)
+        frame_width = int(shape[1] or 0)
+        if frame_width <= 2 or frame_height <= 2:
+            return frame, 0, 0
+
+        x_norm, y_norm, width_norm, height_norm = self.crop_region_norm
+        x_start = int(round(x_norm * frame_width))
+        y_start = int(round(y_norm * frame_height))
+        x_end = int(round((x_norm + width_norm) * frame_width))
+        y_end = int(round((y_norm + height_norm) * frame_height))
+
+        x_start = max(0, min(frame_width - 1, x_start))
+        y_start = max(0, min(frame_height - 1, y_start))
+        x_end = max(x_start + 1, min(frame_width, x_end))
+        y_end = max(y_start + 1, min(frame_height, y_end))
+
+        if x_end - x_start <= 1 or y_end - y_start <= 1:
+            return frame, 0, 0
+
+        try:
+            cropped_frame = frame[y_start:y_end, x_start:x_end]
+        except Exception:
+            return frame, 0, 0
+        cropped_size = getattr(cropped_frame, "size", 0)
+        if not cropped_size:
+            return frame, 0, 0
+        return cropped_frame, x_start, y_start
+
+    @staticmethod
+    def _translate_detections(
+        detections: list[OcrDetection],
+        offset_x: int,
+        offset_y: int,
+    ) -> list[OcrDetection]:
+        translated: list[OcrDetection] = []
+        for detection in detections:
+            translated_bbox = [(x + offset_x, y + offset_y) for x, y in detection.bbox] if detection.bbox else []
+            translated.append(
+                OcrDetection(
+                    text=detection.text,
+                    confidence=detection.confidence,
+                    bbox=translated_bbox,
+                    center=(detection.center[0] + offset_x, detection.center[1] + offset_y),
+                )
+            )
+        return translated
 
     def _filter_detections(self, detections: list[OcrDetection]) -> list[OcrDetection]:
         filtered: list[OcrDetection] = []
@@ -557,6 +640,75 @@ class OcrWorker(QThread):
         return merged
 
     @staticmethod
+    def _merge_box_detections(detections: list[OcrDetection]) -> list[OcrDetection]:
+        if len(detections) <= 1:
+            return detections
+
+        groups: list[list[OcrDetection]] = []
+        pending = set(range(len(detections)))
+        while pending:
+            current_index = pending.pop()
+            queue = [current_index]
+            group_indexes = [current_index]
+            while queue:
+                source_index = queue.pop()
+                source = detections[source_index]
+                linked_indexes = []
+                for candidate_index in list(pending):
+                    candidate = detections[candidate_index]
+                    if OcrWorker._should_merge_as_box(source, candidate):
+                        linked_indexes.append(candidate_index)
+                for linked in linked_indexes:
+                    pending.remove(linked)
+                    queue.append(linked)
+                    group_indexes.append(linked)
+            groups.append([detections[index] for index in group_indexes])
+
+        merged: list[OcrDetection] = []
+        for group in groups:
+            if len(group) == 1:
+                merged.append(group[0])
+                continue
+            ordered_group = sorted(group, key=lambda item: (item.center[1], item.center[0]))
+            merged.append(OcrWorker._build_group_detection(ordered_group))
+
+        merged.sort(key=lambda item: (item.center[1], item.center[0]))
+        return merged
+
+    @staticmethod
+    def _should_merge_as_box(left: OcrDetection, right: OcrDetection) -> bool:
+        left_x_min, left_x_max = OcrWorker._x_bounds(left)
+        right_x_min, right_x_max = OcrWorker._x_bounds(right)
+        left_y_min, left_y_max = OcrWorker._y_bounds(left)
+        right_y_min, right_y_max = OcrWorker._y_bounds(right)
+
+        left_width = max(1.0, left_x_max - left_x_min)
+        right_width = max(1.0, right_x_max - right_x_min)
+        left_height = max(1.0, left_y_max - left_y_min)
+        right_height = max(1.0, right_y_max - right_y_min)
+
+        x_overlap = max(0.0, min(left_x_max, right_x_max) - max(left_x_min, right_x_min))
+        x_overlap_ratio = x_overlap / min(left_width, right_width)
+        if x_overlap_ratio < 0.52:
+            return False
+
+        width_ratio = max(left_width, right_width) / min(left_width, right_width)
+        if width_ratio > 2.4:
+            return False
+
+        left_center_x = (left_x_min + left_x_max) / 2.0
+        right_center_x = (right_x_min + right_x_max) / 2.0
+        if abs(left_center_x - right_center_x) > max(34.0, min(left_width, right_width) * 0.35):
+            return False
+
+        vertical_gap = max(0.0, max(left_y_min, right_y_min) - min(left_y_max, right_y_max))
+        avg_height = (left_height + right_height) / 2.0
+        if vertical_gap > max(30.0, avg_height * 1.8):
+            return False
+
+        return True
+
+    @staticmethod
     def _merge_bubble_detections(detections: list[OcrDetection]) -> list[OcrDetection]:
         if len(detections) <= 1:
             return detections
@@ -613,15 +765,15 @@ class OcrWorker(QThread):
         horizontal_gap = max(0.0, max(left_x_min, right_x_min) - min(left_x_max, right_x_max))
         avg_height = (left_height + right_height) / 2.0
 
-        if x_overlap_ratio >= 0.28 and vertical_gap <= max(42.0, avg_height * 3.1):
+        if x_overlap_ratio >= 0.4 and vertical_gap <= max(34.0, avg_height * 2.2):
             return True
-        if x_overlap_ratio >= 0.5 and vertical_gap <= max(28.0, avg_height * 2.2):
+        if x_overlap_ratio >= 0.62 and vertical_gap <= max(24.0, avg_height * 1.8):
             return True
 
         # Caso límite para globos inclinados o curvas de texto.
-        if y_overlap_ratio >= 0.4 and horizontal_gap <= max(80.0, min(left_width, right_width) * 0.55):
+        if y_overlap_ratio >= 0.45 and horizontal_gap <= max(60.0, min(left_width, right_width) * 0.42):
             center_distance = hypot(left.center[0] - right.center[0], left.center[1] - right.center[1])
-            if center_distance <= max(left_width, right_width) * 1.45:
+            if center_distance <= max(left_width, right_width) * 1.2:
                 return True
 
         return False
@@ -758,6 +910,9 @@ class OcrWorker(QThread):
         word_count = len(words)
         duration_ms = max(0, segment.end_ms - segment.start_ms)
 
+        if self._is_likely_scene_text(text, words, duration_ms, segment_hits, segment.bbox):
+            return False
+
         if word_count >= 2:
             return True
         if word_count == 0:
@@ -771,6 +926,49 @@ class OcrWorker(QThread):
             return not self._is_suspicious_single_word(token)
         if segment_hits >= 3:
             return not self._is_suspicious_single_word(token)
+        return False
+
+    def _is_likely_scene_text(
+        self,
+        text: str,
+        words: list[str],
+        duration_ms: int,
+        segment_hits: int,
+        bbox: list[tuple[float, float]] | None,
+    ) -> bool:
+        if not words:
+            return True
+
+        has_terminal_punctuation = bool(re.search(r"[.!?]['\"]?$", text))
+        if len(words) <= 2 and segment_hits >= 3:
+            if duration_ms >= max(2800, self._sample_interval_ms * 4) and not has_terminal_punctuation:
+                return True
+
+        if len(words) <= 3 and segment_hits >= 3 and not has_terminal_punctuation:
+            title_or_upper_words = 0
+            for word in words:
+                if word.isupper() or word.istitle():
+                    title_or_upper_words += 1
+            if title_or_upper_words == len(words) and duration_ms >= max(1600, self._sample_interval_ms * 2):
+                return True
+
+        if not bbox:
+            return False
+        if self._frame_width <= 0 or self._frame_height <= 0:
+            return False
+
+        xs = [point[0] for point in bbox]
+        ys = [point[1] for point in bbox]
+        if not xs or not ys:
+            return False
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        box_width = max(1.0, x_max - x_min)
+        box_height = max(1.0, y_max - y_min)
+        area_ratio = (box_width * box_height) / max(1.0, self._frame_width * self._frame_height)
+        if area_ratio < 0.00045 and len(words) <= 2 and not has_terminal_punctuation:
+            return True
+
         return False
 
     @staticmethod
@@ -839,6 +1037,29 @@ class OcrWorker(QThread):
         return (height * height + width * width) ** 0.5
 
     @staticmethod
+    def _normalize_crop_region(
+        crop_region_norm: tuple[float, float, float, float] | None,
+    ) -> tuple[float, float, float, float] | None:
+        if crop_region_norm is None:
+            return None
+        if len(crop_region_norm) != 4:
+            return None
+        try:
+            x_norm = float(crop_region_norm[0])
+            y_norm = float(crop_region_norm[1])
+            width_norm = float(crop_region_norm[2])
+            height_norm = float(crop_region_norm[3])
+        except Exception:
+            return None
+        x_norm = max(0.0, min(1.0, x_norm))
+        y_norm = max(0.0, min(1.0, y_norm))
+        width_norm = max(0.0, min(1.0 - x_norm, width_norm))
+        height_norm = max(0.0, min(1.0 - y_norm, height_norm))
+        if width_norm <= 0.01 or height_norm <= 0.01:
+            return None
+        return x_norm, y_norm, width_norm, height_norm
+
+    @staticmethod
     def _safe_float(value: object) -> float | None:
         try:
             number = float(value)  # type: ignore[arg-type]
@@ -892,9 +1113,9 @@ class OcrWorker(QThread):
                 device=device,
                 text_detection_model_name="PP-OCRv5_server_det",
                 text_recognition_model_name="en_PP-OCRv5_mobile_rec",
-                use_doc_orientation_classify=False,
+                use_doc_orientation_classify=True,
                 use_doc_unwarping=False,
-                use_textline_orientation=False,
+                use_textline_orientation=True,
                 text_rec_score_thresh=0.6,
             )
         except Exception as exc:

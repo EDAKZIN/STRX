@@ -5,7 +5,7 @@ import platform
 import subprocess
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt, QUrl
+from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QUrl
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QAbstractItemView,
     QCheckBox,
+    QRubberBand,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -41,7 +42,7 @@ from ui.toggle_switch import ToggleSwitch
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("STRX MVP - OCR STR")
+        self.setWindowTitle("STRX")
         self.resize(1700, 980)
 
         self.video_path: Path | None = None
@@ -58,6 +59,9 @@ class MainWindow(QMainWindow):
         self.gpu_name = ""
         self.gpu_error = ""
         self.cpu_name = self._detect_cpu_name()
+        self.video_frame_size = QSize()
+        self.region_selection_rect: QRect | None = None
+        self.region_drag_origin: QPoint | None = None
 
         self._build_ui()
         self._connect_events()
@@ -114,6 +118,10 @@ class MainWindow(QMainWindow):
         self.chk_language_correction = QCheckBox("Corregir texto OCR")
         self.chk_language_correction.setObjectName("chkCorrection")
         self.chk_language_correction.setChecked(True)
+        self.btn_toggle_region = QPushButton("OCR por área")
+        self.btn_toggle_region.setObjectName("btnToggleRegion")
+        self.btn_toggle_region.setCheckable(True)
+        self.btn_toggle_region.setChecked(False)
         self.gpu_status_label = QLabel("GPU: validando...")
         self.gpu_status_label.setObjectName("gpuStatus")
 
@@ -124,6 +132,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.lbl_ocr_engine)
         controls.addWidget(self.chk_language_correction)
         controls.addWidget(self.gpu_toggle_wrap)
+        controls.addWidget(self.btn_toggle_region)
         controls.addWidget(self.btn_start_ocr)
         controls.addWidget(self.btn_cancel_ocr)
         controls.addWidget(self.btn_export)
@@ -156,6 +165,15 @@ class MainWindow(QMainWindow):
         video_container_layout = QVBoxLayout(self.video_container)
         video_container_layout.setContentsMargins(0, 0, 0, 0)
         video_container_layout.addWidget(self.video_widget)
+
+        # Marco de selección como widget FLOTANTE (sin padre) para aparecer sobre el video
+        # Esto es necesario porque QVideoWidget en Qt6 rendering por encima de todo
+        self.region_selection_band = QLabel(self)
+        self.region_selection_band.setObjectName("selectionFrame")
+        self.region_selection_band.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.region_selection_band.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.region_selection_band.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.region_selection_band.hide()
         self._layout_video_overlay()
 
         self.timeline = TimelineWidget()
@@ -232,6 +250,7 @@ class MainWindow(QMainWindow):
         self.btn_view_process.clicked.connect(self.show_process_view)
         self.btn_back_editor.clicked.connect(self.show_editor_view)
         self.chk_use_gpu.toggled.connect(self.on_compute_toggle_changed)
+        self.btn_toggle_region.toggled.connect(self.on_region_toggle_changed)
 
         self.table.itemChanged.connect(self.on_table_item_changed)
         self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
@@ -243,6 +262,8 @@ class MainWindow(QMainWindow):
 
         self.media_player.positionChanged.connect(self.on_player_position_changed)
         self.media_player.durationChanged.connect(self.on_player_duration_changed)
+        if self.video_sink is not None:
+            self.video_sink.videoFrameChanged.connect(self.on_video_frame_changed)
 
     def open_video(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
@@ -256,6 +277,10 @@ class MainWindow(QMainWindow):
 
         self.video_path = Path(path_str)
         self.media_player.setSource(QUrl.fromLocalFile(str(self.video_path)))
+        self.video_frame_size = QSize()
+        self.region_drag_origin = None
+        self.region_selection_rect = None
+        self._sync_region_selection_band()
         self._set_video_subtitle_text("")
         self.video_overlay_label.hide()
         self.status_label.setText(f"Video cargado: {self.video_path.name}")
@@ -298,6 +323,14 @@ class MainWindow(QMainWindow):
             warning_text = "OCR en CPU: el proceso será más lento que con GPU."
             QMessageBox.warning(self, "OCR en CPU", warning_text)
             self.append_process_log(warning_text)
+        crop_region = self._selected_crop_region()
+        if crop_region is not None:
+            x_norm, y_norm, width_norm, height_norm = crop_region
+            self.append_process_log(
+                f"OCR por área activo: x={x_norm:.3f}, y={y_norm:.3f}, ancho={width_norm:.3f}, alto={height_norm:.3f}"
+            )
+        elif self.btn_toggle_region.isChecked():
+            self.append_process_log("OCR por área activo sin selección válida. Se usará pantalla completa.")
 
         model_paths = configure_model_environment()
         self.worker = OcrWorker(
@@ -306,6 +339,7 @@ class MainWindow(QMainWindow):
             model_paths=model_paths,
             enable_language_correction=enable_correction,
             use_gpu=use_gpu,
+            crop_region_norm=crop_region,
         )
         self.worker.progress.connect(self.progress.setValue)
         self.worker.status.connect(self.on_worker_status)
@@ -539,11 +573,15 @@ class MainWindow(QMainWindow):
         self.content_stack.setCurrentIndex(1)
         self.btn_view_process.setVisible(False)
         self.btn_back_editor.setVisible(True)
+        # Ocultar el marco de selección al salir del editor
+        self.region_selection_band.hide()
 
     def show_editor_view(self) -> None:
         self.content_stack.setCurrentIndex(0)
         self.btn_view_process.setVisible(True)
         self.btn_back_editor.setVisible(False)
+        # Restaurar el marco si corresponde
+        self._sync_region_selection_band()
 
     def clear_process_table(self) -> None:
         self.process_table.setRowCount(0)
@@ -579,6 +617,28 @@ class MainWindow(QMainWindow):
     def on_compute_toggle_changed(self, checked: bool) -> None:
         del checked
         self._apply_compute_status_badge()
+
+    def on_region_toggle_changed(self, checked: bool) -> None:
+        self.region_drag_origin = None
+        if checked:
+            self.video_widget.setCursor(Qt.CursorShape.CrossCursor)
+            self.status_label.setText("OCR por área activado. Arrastra sobre el video para seleccionar un área.")
+        else:
+            self.video_widget.unsetCursor()
+            self.status_label.setText("OCR por área desactivado. Se usará pantalla completa.")
+        self._sync_region_selection_band()
+
+    def on_video_frame_changed(self, frame) -> None:
+        size_getter = getattr(frame, "size", None)
+        frame_size = size_getter() if callable(size_getter) else QSize()
+        if not isinstance(frame_size, QSize):
+            return
+        if frame_size.width() <= 0 or frame_size.height() <= 0:
+            return
+        if frame_size == self.video_frame_size:
+            return
+        self.video_frame_size = frame_size
+        self._sync_region_selection_band()
 
     def refresh_gpu_status(self) -> None:
         previous_gpu_choice = self.chk_use_gpu.isChecked()
@@ -689,6 +749,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel_ocr.setEnabled(worker_running)
         self.btn_play.setEnabled(has_video)
         self.btn_export.setEnabled(bool(self.segments))
+        self.btn_toggle_region.setEnabled(has_video and not worker_running)
 
     def update_subtitle_overlay(self, position_ms: int) -> None:
         if not self.segments:
@@ -729,11 +790,170 @@ class MainWindow(QMainWindow):
         y = max(12, self.video_widget.height() - height - 18)
         self.video_overlay_label.setGeometry(x, y, width, height)
         self.video_overlay_label.raise_()
+        self._sync_region_selection_band()
+
+    def _video_display_rect(self) -> QRect:
+        widget_rect = self.video_widget.rect()
+        if widget_rect.width() <= 0 or widget_rect.height() <= 0:
+            return QRect()
+        if self.video_frame_size.width() <= 0 or self.video_frame_size.height() <= 0:
+            return widget_rect
+
+        video_aspect = self.video_frame_size.width() / self.video_frame_size.height()
+        widget_aspect = widget_rect.width() / widget_rect.height()
+        if widget_aspect > video_aspect:
+            height = widget_rect.height()
+            width = max(1, int(round(height * video_aspect)))
+            x = (widget_rect.width() - width) // 2
+            return QRect(x, 0, width, height)
+
+        width = widget_rect.width()
+        height = max(1, int(round(width / video_aspect)))
+        y = (widget_rect.height() - height) // 2
+        return QRect(0, y, width, height)
+
+    def _normalize_selection_rect(self, start: QPoint, end: QPoint) -> QRect:
+        video_rect = self._video_display_rect()
+        if video_rect.isEmpty():
+            return QRect()
+        min_x, max_x = video_rect.left(), video_rect.right()
+        min_y, max_y = video_rect.top(), video_rect.bottom()
+        start_x = min(max(start.x(), min_x), max_x)
+        start_y = min(max(start.y(), min_y), max_y)
+        end_x = min(max(end.x(), min_x), max_x)
+        end_y = min(max(end.y(), min_y), max_y)
+        return QRect(QPoint(start_x, start_y), QPoint(end_x, end_y)).normalized().intersected(video_rect)
+
+    def _sync_region_selection_band(self) -> None:
+        if not self.btn_toggle_region.isChecked():
+            self.region_selection_band.hide()
+            return
+        
+        # Determinar el rectángulo visible
+        rect_to_show = None
+        
+        if self.region_drag_origin is not None and self.region_selection_rect is not None:
+            video_rect = self._video_display_rect()
+            if not video_rect.isEmpty():
+                visible_rect = self.region_selection_rect.intersected(video_rect)
+                if visible_rect.width() >= 1 and visible_rect.height() >= 1:
+                    rect_to_show = visible_rect
+        elif self.region_selection_rect is not None:
+            video_rect = self._video_display_rect()
+            if not video_rect.isEmpty():
+                visible_rect = self.region_selection_rect.intersected(video_rect)
+                if visible_rect.width() > 1 and visible_rect.height() > 1:
+                    rect_to_show = visible_rect
+        
+        if rect_to_show is None:
+            self.region_selection_band.hide()
+            return
+            
+        # Convertir coordenadas locales del video_widget a coordenadas globales de pantalla
+        # Para el widget flotante, necesitamos posicionarla correctamente
+        global_pos = self.video_widget.mapToGlobal(rect_to_show.topLeft())
+        global_rect = QRect(global_pos, rect_to_show.size())
+        
+        self.region_selection_band.setStyleSheet(
+            "border: 2px solid #0ea5e9; border-radius: 3px; background: transparent;"
+        )
+        self.region_selection_band.setGeometry(global_rect)
+        self.region_selection_band.show()
+        self.region_selection_band.raise_()
+
+    def _selected_crop_region(self) -> tuple[float, float, float, float] | None:
+        if not self.btn_toggle_region.isChecked() or self.region_selection_rect is None:
+            return None
+        video_rect = self._video_display_rect()
+        if video_rect.width() <= 0 or video_rect.height() <= 0:
+            return None
+        selection = self.region_selection_rect.intersected(video_rect)
+        if selection.width() <= 2 or selection.height() <= 2:
+            return None
+        x_norm = (selection.left() - video_rect.left()) / video_rect.width()
+        y_norm = (selection.top() - video_rect.top()) / video_rect.height()
+        width_norm = selection.width() / video_rect.width()
+        height_norm = selection.height() / video_rect.height()
+        if width_norm <= 0.01 or height_norm <= 0.01:
+            return None
+        x_norm = max(0.0, min(1.0, x_norm))
+        y_norm = max(0.0, min(1.0, y_norm))
+        width_norm = max(0.0, min(1.0 - x_norm, width_norm))
+        height_norm = max(0.0, min(1.0 - y_norm, height_norm))
+        return x_norm, y_norm, width_norm, height_norm
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
-        if watched is self.video_widget and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
-            self._layout_video_overlay()
+        if watched is self.video_widget:
+            event_type = event.type()
+            if event_type in (QEvent.Type.Resize, QEvent.Type.Show):
+                self._layout_video_overlay()
+
+            if self.btn_toggle_region.isChecked():
+                # Mostrar marco deshabilitado cuando el mouse está fuera del área de video
+                if event_type == QEvent.Type.MouseMove and self.region_drag_origin is None:
+                    mouse_pos = event.position().toPoint()
+                    video_rect = self._video_display_rect()
+                    if not video_rect.contains(mouse_pos):
+                        # Mouse fuera del área de video - cursor bloqueado
+                        self.video_widget.setCursor(Qt.CursorShape.ForbiddenCursor)
+                        self._hide_disabled_frame()
+                    else:
+                        # Mouse dentro del video - cursor de selección
+                        self.video_widget.setCursor(Qt.CursorShape.CrossCursor)
+                        self._hide_disabled_frame()
+                    return True
+                    
+                if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                    click_position = event.position().toPoint()
+                    if self._video_display_rect().contains(click_position):
+                        self.region_drag_origin = click_position
+                        self.region_selection_rect = QRect(click_position, click_position)
+                        self._sync_region_selection_band()
+                        return True
+                elif event_type == QEvent.Type.MouseMove and self.region_drag_origin is not None:
+                    current_position = event.position().toPoint()
+                    self.region_selection_rect = self._normalize_selection_rect(self.region_drag_origin, current_position)
+                    self._sync_region_selection_band()
+                    return True
+                elif (
+                    event_type == QEvent.Type.MouseButtonRelease
+                    and event.button() == Qt.MouseButton.LeftButton
+                    and self.region_drag_origin is not None
+                ):
+                    release_position = event.position().toPoint()
+                    self.region_selection_rect = self._normalize_selection_rect(self.region_drag_origin, release_position)
+                    self.region_drag_origin = None
+                    if self.region_selection_rect.width() < 12 or self.region_selection_rect.height() < 12:
+                        self.region_selection_rect = None
+                        self.status_label.setText("Selección descartada. Se usará pantalla completa.")
+                    else:
+                        self.status_label.setText("Área de OCR seleccionada.")
+                    self._sync_region_selection_band()
+                    return True
         return super().eventFilter(watched, event)
+
+    def _show_disabled_frame(self) -> None:
+        """Muestra un marco deshabilitado cuando el mouse está fuera del área de video"""
+        video_rect = self._video_display_rect()
+        if video_rect.isEmpty():
+            return
+        # Convertir a coordenadas globales
+        global_pos = self.video_widget.mapToGlobal(video_rect.topLeft())
+        global_rect = QRect(global_pos, video_rect.size())
+        self.region_selection_band.setGeometry(global_rect)
+        self.region_selection_band.setProperty("disabled", True)
+        self.region_selection_band.setStyleSheet("border: 2px dashed #6b7280; background: transparent;")
+        self.region_selection_band.show()
+        self.region_selection_band.raise_()
+
+    def _hide_disabled_frame(self) -> None:
+        if self.region_selection_band.property("disabled"):
+            self.region_selection_band.setProperty("disabled", False)
+            self.region_selection_band.setStyleSheet(
+                "border: 2px solid #0ea5e9; border-radius: 3px; background: transparent;"
+            )
+            if self.region_drag_origin is None and self.region_selection_rect is None:
+                self.region_selection_band.hide()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -894,6 +1114,19 @@ class MainWindow(QMainWindow):
             QPushButton#btnSecondary:hover {
                 background: #1d2d42;
             }
+            QPushButton#btnToggleRegion {
+                background: #162233;
+                border-color: #324a66;
+                color: #d6e0ec;
+            }
+            QPushButton#btnToggleRegion:hover {
+                background: #1d2d42;
+            }
+            QPushButton#btnToggleRegion:checked {
+                background: #224766;
+                border-color: #5a82aa;
+                color: #eff6ff;
+            }
             QPushButton#btnGhost {
                 background: #121923;
                 border-color: #2f3946;
@@ -1007,6 +1240,15 @@ class MainWindow(QMainWindow):
                 padding: 4px 10px;
                 font-size: 21px;
                 font-weight: 700;
+            }
+            QLabel#selectionFrame {
+                background: transparent;
+                border: 2px solid #3b82f6;
+                border-radius: 0px;
+            }
+            QLabel#selectionFrame.disabled {
+                border: 2px dashed #6b7280;
+                background: transparent;
             }
             """
         )
