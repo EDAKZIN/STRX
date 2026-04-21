@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import os
 import re
 import traceback
@@ -104,6 +105,12 @@ class OcrWorker(QThread):
         self._track_counter = 0
         self._sample_interval_ms = max(1, int(round(1000.0 / self.sample_fps)))
         self._track_ttl_steps = 1
+        self._close_padding_factor = 0.20
+        self._predictive_start_offset_ms = 150
+        self._backtrack_history_steps = 10
+        self._recent_detection_history: deque[tuple[int, list[OcrDetection]]] = deque(
+            maxlen=self._backtrack_history_steps
+        )
         self._frame_width = 0.0
         self._frame_height = 0.0
         self._recalculate_track_ttl()
@@ -123,7 +130,7 @@ class OcrWorker(QThread):
         self._frame_width = float(shape[1] or 0.0)
 
     def _estimate_close_timestamp(self, current_timestamp_ms: int, last_seen_ms: int) -> int:
-        trailing_padding = max(80, int(self._sample_interval_ms * 0.55))
+        trailing_padding = max(80, int(self._sample_interval_ms * self._close_padding_factor))
         return min(current_timestamp_ms, last_seen_ms + trailing_padding)
 
     def run(self) -> None:
@@ -167,6 +174,7 @@ class OcrWorker(QThread):
         frame_index = 0
         self._tracks.clear()
         self._track_counter = 0
+        self._recent_detection_history.clear()
 
         if effective_gpu:
             self.status.emit("Procesando video con PaddleOCR en GPU...")
@@ -198,6 +206,7 @@ class OcrWorker(QThread):
                     detections = self._apply_correction(corrector, detections)
                 for closed_segment in self._update_tracks(timestamp_ms, detections, frame_diagonal):
                     self.segment_found.emit(closed_segment)
+                self._store_detection_history(timestamp_ms, detections)
 
                 if total_frames > 0:
                     progress = min(100, int((frame_index / total_frames) * 100))
@@ -205,7 +214,7 @@ class OcrWorker(QThread):
 
                 frame_index += 1
 
-            flush_end = last_timestamp_ms + max(80, int(self._sample_interval_ms * 0.55))
+            flush_end = last_timestamp_ms + max(80, int(self._sample_interval_ms * self._close_padding_factor))
             for closed_segment in self._flush_tracks(flush_end):
                 self.segment_found.emit(closed_segment)
 
@@ -266,7 +275,7 @@ class OcrWorker(QThread):
             track.last_confidence = detection.confidence
             track.last_seen_ms = timestamp_ms
             track.missed_steps = 0
-            closed_drafts = track.segmenter.push(timestamp_ms, detection.text)
+            closed_drafts = track.segmenter.push(timestamp_ms, detection.text, detection.confidence)
             if closed_drafts:
                 previous_hits = track.segment_hits
                 for closed in closed_drafts:
@@ -280,7 +289,8 @@ class OcrWorker(QThread):
         for detection_index, detection in enumerate(detections):
             if detection_index in matched_detection_indexes:
                 continue
-            track = self._start_track(detection, timestamp_ms)
+            refined_start_ms = self._estimate_track_start_ms(detection, timestamp_ms, frame_diagonal)
+            track = self._start_track(detection, timestamp_ms, refined_start_ms)
             matched_track_ids.add(track.track_id)
 
         stale_track_ids: list[str] = []
@@ -310,9 +320,15 @@ class OcrWorker(QThread):
         self._tracks.clear()
         return emitted
 
-    def _start_track(self, detection: OcrDetection, timestamp_ms: int) -> TrackState:
+    def _start_track(
+        self,
+        detection: OcrDetection,
+        timestamp_ms: int,
+        start_timestamp_ms: int | None = None,
+    ) -> TrackState:
         track_id = f"track-{self._track_counter}"
         self._track_counter += 1
+        initial_timestamp_ms = timestamp_ms if start_timestamp_ms is None else max(0, min(start_timestamp_ms, timestamp_ms))
         track = TrackState(
             track_id=track_id,
             segmenter=TextChangeSegmenter(min_duration_ms=200, similarity_threshold=0.84),
@@ -324,9 +340,59 @@ class OcrWorker(QThread):
             segment_hits=1,
             missed_steps=0,
         )
-        track.segmenter.push(timestamp_ms, detection.text)
+        track.segmenter.push(initial_timestamp_ms, detection.text, detection.confidence)
         self._tracks[track_id] = track
         return track
+
+    def _store_detection_history(self, timestamp_ms: int, detections: list[OcrDetection]) -> None:
+        snapshot = [
+            OcrDetection(
+                text=item.text,
+                confidence=item.confidence,
+                bbox=[(x, y) for x, y in item.bbox],
+                center=item.center,
+            )
+            for item in detections
+        ]
+        self._recent_detection_history.append((timestamp_ms, snapshot))
+
+    def _estimate_track_start_ms(
+        self,
+        detection: OcrDetection,
+        timestamp_ms: int,
+        frame_diagonal: float,
+    ) -> int:
+        earliest_match_ms = timestamp_ms
+        saw_match = False
+        for history_timestamp_ms, history_detections in reversed(self._recent_detection_history):
+            if history_timestamp_ms >= timestamp_ms:
+                continue
+            has_match = self._contains_similar_detection(detection, history_detections, frame_diagonal)
+            if has_match:
+                earliest_match_ms = history_timestamp_ms
+                saw_match = True
+                continue
+            if saw_match:
+                break
+        return max(0, earliest_match_ms - self._predictive_start_offset_ms)
+
+    def _contains_similar_detection(
+        self,
+        target: OcrDetection,
+        candidates: list[OcrDetection],
+        frame_diagonal: float,
+    ) -> bool:
+        if not candidates:
+            return False
+        distance_limit = max(42.0, frame_diagonal * 0.03)
+        for candidate in candidates:
+            similarity = self._text_similarity(target.text, candidate.text)
+            if similarity < 0.74:
+                continue
+            distance = hypot(target.center[0] - candidate.center[0], target.center[1] - candidate.center[1])
+            if distance <= distance_limit:
+                return True
+        return False
 
     def _assign_detections_to_tracks(
         self,
@@ -922,7 +988,7 @@ class OcrWorker(QThread):
         token_lower = token.lower()
         if token_lower in COMMON_SINGLE_WORD_SUBTITLES:
             return True
-        if duration_ms >= (self._sample_interval_ms * 2) and segment_hits >= 2:
+        if segment_hits >= 2 and duration_ms >= max(350, int(self._sample_interval_ms * 0.9)):
             return not self._is_suspicious_single_word(token)
         if segment_hits >= 3:
             return not self._is_suspicious_single_word(token)

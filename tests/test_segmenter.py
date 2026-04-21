@@ -52,6 +52,24 @@ class SegmenterTests(unittest.TestCase):
         self.assertEqual(closed[0].start_ms, 0)
         self.assertEqual(closed[0].end_ms, 3000)
 
+    def test_prioriza_variante_con_mejor_confianza(self) -> None:
+        segmenter = TextChangeSegmenter(min_duration_ms=100, similarity_threshold=0.72)
+        segmenter.push(0, "I really iike this", confidence=0.2)
+        segmenter.push(1000, "I really iike this", confidence=0.2)
+        segmenter.push(2000, "I really like this", confidence=0.93)
+        segmenter.push(3000, "I really iike this", confidence=0.2)
+        segmenter.push(4000, "I really like this", confidence=0.94)
+        closed = segmenter.push(5000, "Next sentence", confidence=0.9)
+
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0].text, "I really like this")
+
+    def test_penaliza_texto_con_exceso_de_simbolos(self) -> None:
+        noisy_score = TextChangeSegmenter._quality_score("##==??____")
+        clean_score = TextChangeSegmenter._quality_score("Please wait")
+        self.assertLess(noisy_score, clean_score)
+        self.assertLess(noisy_score, -10.0)
+
 
 if __name__ == "__main__":
     unittest.main()

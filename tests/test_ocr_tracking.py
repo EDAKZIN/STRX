@@ -47,9 +47,10 @@ class OcrTrackingTests(unittest.TestCase):
 
         self.assertEqual(self.worker._update_tracks(0, detections, frame_diagonal), [])
         self.assertEqual(self.worker._update_tracks(1000, detections, frame_diagonal), [])
-        self.assertEqual(self.worker._update_tracks(2000, [], frame_diagonal), [])
-        self.assertEqual(self.worker._update_tracks(3000, [], frame_diagonal), [])
-        closed = self.worker._update_tracks(4000, [], frame_diagonal)
+        closed_2000 = self.worker._update_tracks(2000, [], frame_diagonal)
+        closed_3000 = self.worker._update_tracks(3000, [], frame_diagonal)
+        closed_4000 = self.worker._update_tracks(4000, [], frame_diagonal)
+        closed = closed_2000 + closed_3000 + closed_4000
 
         self.assertEqual(len(closed), 2)
         self.assertSetEqual(
@@ -143,8 +144,7 @@ class OcrTrackingTests(unittest.TestCase):
 
         self.assertEqual(self.worker._update_tracks(0, detections, frame_diagonal), [])
         self.assertEqual(self.worker._update_tracks(1000, [], frame_diagonal), [])
-        self.assertEqual(self.worker._update_tracks(2000, [], frame_diagonal), [])
-        kept = self.worker._update_tracks(3000, [], frame_diagonal)
+        kept = self.worker._update_tracks(2000, [], frame_diagonal)
         self.assertEqual(len(kept), 1)
         self.assertEqual(kept[0].text, "Wait")
 
