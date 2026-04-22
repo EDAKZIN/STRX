@@ -1224,11 +1224,38 @@ class OcrWorker(QThread):
     def _resolve_gpu_flag() -> bool:
         try:
             import paddle
-        except Exception:
+        except Exception as exc:
+            OcrWorker._write_cuda_diag(f"ERROR importando paddle: {exc}")
             return False
         try:
-            if not paddle.is_compiled_with_cuda():
+            compiled = paddle.is_compiled_with_cuda()
+            if not compiled:
+                OcrWorker._write_cuda_diag("paddle.is_compiled_with_cuda() = False")
                 return False
-            return paddle.device.cuda.device_count() > 0
-        except Exception:
+            count = paddle.device.cuda.device_count()
+            OcrWorker._write_cuda_diag(f"CUDA OK - device_count={count}")
+            return count > 0
+        except Exception as exc:
+            OcrWorker._write_cuda_diag(f"ERROR comprobando CUDA: {exc}")
             return False
+
+    @staticmethod
+    def _write_cuda_diag(mensaje: str) -> None:
+        """Escribe diagnóstico de CUDA para debugging. Eliminar tras resolver el problema."""
+        import sys, os
+        try:
+            from config import LOGS_DIR
+            log_path = LOGS_DIR / "cuda_diag.txt"
+            lines = [mensaje, "", "sys._MEIPASS: " + str(getattr(sys, "_MEIPASS", "N/A"))]
+            meipass_str = getattr(sys, "_MEIPASS", "")
+            if meipass_str:
+                from pathlib import Path
+                meipass = Path(meipass_str)
+                for folder in ["", "paddle/libs", "nvidia"]:
+                    p = meipass / folder if folder else meipass
+                    cuda_dlls = [f.name for f in p.glob("cuda*.dll")] if p.exists() else []
+                    lines.append(f"  {folder or 'raiz'}: {cuda_dlls[:4]}")
+            lines.append("PATH[:300]: " + os.environ.get("PATH", "")[:300])
+            log_path.write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass

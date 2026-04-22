@@ -745,35 +745,45 @@ class MainWindow(QMainWindow):
         self.gpu_status_label.style().polish(self.gpu_status_label)
 
     def _detect_cpu_name(self) -> str:
+        """Obtiene el nombre comercial del procesador de forma rápida y sin abrir consolas."""
         if os.name == "nt":
-            name = self._run_cpu_query(["wmic", "cpu", "get", "name"])
-            if name:
-                return name
-            name = self._run_cpu_query(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    "(Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name | Select-Object -First 1)",
-                ]
-            )
-            if name:
-                return name
-
-        name = platform.processor().strip()
-        if name:
-            return name
-
-        env_name = os.environ.get("PROCESSOR_IDENTIFIER", "").strip()
-        if env_name:
-            return env_name
-
-        return "Procesador no identificado"
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+                name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+                winreg.CloseKey(key)
+                if name:
+                    return str(name).strip()
+            except Exception:
+                pass
+        
+        # Fallback ultra-rápido
+        return platform.processor() or os.environ.get("PROCESSOR_IDENTIFIER", "Procesador Genérico")
 
     @staticmethod
     def _run_cpu_query(command: list[str]) -> str:
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False)
+            # Asegurar que el PATH del sistema esté disponible para encontrar wmic/powershell
+            env = os.environ.copy()
+            if os.name == "nt":
+                system32 = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32")
+                wbem = os.path.join(system32, "Wbem")
+                paths = [env.get("PATH", ""), system32, wbem]
+                env["PATH"] = os.pathsep.join([p for p in paths if p])
+
+            flags = 0
+            if os.name == "nt":
+                flags = 0x08000000
+
+            result = subprocess.run(
+                command, 
+                capture_output=True, 
+                text=True, 
+                timeout=4, 
+                check=False,
+                creationflags=flags,
+                env=env
+            )
         except Exception:
             return ""
 
