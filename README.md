@@ -6,8 +6,9 @@ Aplicación de escritorio en Python para extraer subtítulos con OCR desde video
 
 - Windows
 - Python 3.11
+- Drivers de NVIDIA actualizados (para soporte GPU)
 
-## Configuración del entorno virtual (PowerShell)
+## Configuración del entorno (Desarrollo)
 
 ```powershell
 cd C:\Users\USUARIO\Documents\Pruebadeappst\STRX
@@ -17,74 +18,61 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` usa PaddleOCR como backend OCR principal.
+`requirements.txt` incluye por defecto el soporte para GPU (CUDA).
 
-## Wheelhouse CUDA portable (recomendado para empaquetado)
+---
 
-Este flujo deja los wheels en `runtime/wheels/` para poder instalar en otra máquina sin internet.
+## Generación de Ejecutable Portable (Distribución)
 
-### 1) Descargar wheels (máquina con internet)
+Este proceso crea una carpeta autónoma que **incluye CUDA y los modelos de IA**. No requiere que el usuario final instale nada más que los drivers de su tarjeta de video.
+
+### 1) Preparar modelos y entorno
+Asegúrate de haber ejecutado la app al menos una vez en desarrollo para que los modelos se descarguen en `runtime/models/`, o que ya existan ahí.
+
+### 2) Ejecutar el Build
+Usa el script de automatización para generar el paquete:
 
 ```powershell
-cd C:\Users\USUARIO\Documents\Pruebadeappst\STRX
-.venv\Scripts\Activate.ps1
+.\scripts\build_export.ps1
+```
+
+*   **Salida:** Una carpeta en `dist\STRX` y un archivo comprimido `dist\STRX_Portable.zip`.
+*   **Nota:** El build es "One-Folder" para evitar tiempos de carga lentos debido al tamaño de los binarios de CUDA (~3 GB).
+
+---
+
+## Wheelhouse CUDA (Instalación Offline)
+
+Si prefieres instalar la app en modo desarrollo en una máquina sin internet:
+
+### 1) Descargar wheels (Máquina con internet)
+```powershell
 .\scripts\build_wheelhouse_cuda.ps1 -CudaChannel cu118 -GpuVersion 3.3.1 -Clean
 ```
 
-Genera:
-- `runtime/wheels/base/` (dependencias generales).
-- `runtime/wheels/cuda/cu118/` (`paddlepaddle-gpu` + dependencias CUDA `nvidia-*`).
-- `runtime/wheels/wheelhouse-manifest.txt` (inventario de wheels).
-
-### 2) Instalar offline desde wheelhouse (máquina destino)
-
+### 2) Instalar offline (Máquina destino)
 ```powershell
-cd C:\Users\USUARIO\Documents\Pruebadeappst\STRX
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
 .\scripts\install_wheelhouse_cuda.ps1 -CudaChannel cu118
 ```
 
-Opcional: agregar `-UpgradePip`.
+---
 
-Notas:
-- El wheelhouse CUDA puede superar ~2.5 GB.
-- El canal (`cu118`, `cu121`, etc.) debe coincidir con la versión CUDA soportada por la GPU/driver objetivo.
-
-## Verificar GPU en el entorno
+## Verificación de Hardware
 
 ```powershell
-python -c "import paddle; print(paddle.__version__); print(paddle.is_compiled_with_cuda()); print(paddle.device.cuda.device_count() if paddle.is_compiled_with_cuda() else 0)"
+python -c "import paddle; print('CUDA:', paddle.is_compiled_with_cuda()); print('Dispositivos:', paddle.device.cuda.device_count())"
 ```
 
-## Ejecución
+## Estructura del Proyecto
 
-```powershell
-cd C:\Users\USUARIO\Documents\Pruebadeappst\STRX
-.venv\Scripts\Activate.ps1
-python src\main.py
-```
-
-## Pruebas unitarias
-
-```powershell
-cd C:\Users\USUARIO\Documents\Pruebadeappst\STRX
-.venv\Scripts\Activate.ps1
-python -m unittest discover -s tests -v
-```
-
-## Estructura principal
-
-- `src/`: código fuente de la aplicación.
-- `runtime/models/`: caché local de modelos descargados (PaddleOCR/Paddle).
-- `runtime/logs/`: logs de ejecución (carpeta generada automáticamente).
-- `runtime/temp/`: temporales.
-- `tests/`: pruebas unitarias del núcleo.
+- `src/`: Código fuente.
+- `runtime/models/`: Pesos de los modelos de IA (Paddle/PaddleX).
+- `runtime/logs/`: Logs de ejecución.
+- `scripts/`: Utilidades de build y mantenimiento.
+- `dist/`: (Generado) Ejecutable final portable.
 
 ## Notas importantes
 
-- La aplicación fuerza el almacenamiento de modelos en `runtime/models/`.
-- Se permite solape de segmentos para escenarios con múltiples textos simultáneos.
-- El exportador valida tiempo de inicio/fin y texto antes de generar `.str`.
-- OCR fijo en inglés para esta versión.
-- Puedes activar/desactivar `Corregir texto OCR` para aplicar corrección por diccionario.
+- **Rutas Relativas:** La aplicación detecta automáticamente si está en modo "frozen" (EXE) y ajusta las rutas para buscar los modelos en su propia carpeta `runtime/`.
+- **OCR:** Optimizado para inglés en esta versión.
+- **GPU:** Si no se detecta CUDA, la app hará fallback automático a CPU.

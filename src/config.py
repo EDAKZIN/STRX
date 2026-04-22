@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if getattr(sys, 'frozen', False):
+    PROJECT_ROOT = Path(sys.executable).parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
 MODELS_DIR = RUNTIME_DIR / "models"
 WHEELS_DIR = RUNTIME_DIR / "wheels"

@@ -1,7 +1,7 @@
 param(
     [string]$PythonExe = ".\.venv\Scripts\python.exe",
     [string]$CudaChannel = "cu118",
-    [string]$RequirementsFile = "requirements-portable-gpu.txt",
+    [string]$RequirementsFile = "requirements.txt",
     [switch]$UpgradePip
 )
 

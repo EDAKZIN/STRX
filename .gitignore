@@ -13,3 +13,7 @@ runtime/wheels/*
 runtime/logs/
 runtime/temp/*
 !runtime/temp/.gitkeep
+
+# PyInstaller
+build/
+dist/
