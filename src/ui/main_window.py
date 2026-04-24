@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from config import configure_model_environment
-from core.exporter import StrExporter
+from core.exporter import StrExporter, SrtExporter
 from core.ocr_worker import OcrWorker
 from core.timecode import format_timecode, parse_timecode
 from models.subtitle_segment import SubtitleSegment
@@ -87,7 +87,7 @@ class MainWindow(QMainWindow):
         self.btn_start_ocr.setObjectName("btnPrimary")
         self.btn_cancel_ocr = QPushButton("Cancelar OCR")
         self.btn_cancel_ocr.setObjectName("btnDanger")
-        self.btn_export = QPushButton("Exportar .str")
+        self.btn_export = QPushButton("Exportar")
         self.btn_export.setObjectName("btnSecondary")
         self.btn_view_process = QPushButton("Ver proceso OCR")
         self.btn_view_process.setObjectName("btnSecondary")
@@ -254,7 +254,7 @@ class MainWindow(QMainWindow):
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_start_ocr.clicked.connect(self.start_ocr)
         self.btn_cancel_ocr.clicked.connect(self.cancel_ocr)
-        self.btn_export.clicked.connect(self.export_str)
+        self.btn_export.clicked.connect(self.show_export_dialog)
         self.btn_view_process.clicked.connect(self.show_process_view)
         self.btn_back_editor.clicked.connect(self.show_editor_view)
         self.chk_use_gpu.toggled.connect(self.on_compute_toggle_changed)
@@ -577,7 +577,7 @@ class MainWindow(QMainWindow):
         self.video_duration_ms = max(0, duration)
         self.refresh_timeline()
 
-    def export_str(self) -> None:
+    def show_export_dialog(self) -> None:
         segments = self.sorted_segments()
         if not segments:
             QMessageBox.warning(self, "Exportación", "No hay segmentos para exportar.")
@@ -595,21 +595,92 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Validación", f"No se puede exportar:\n{details}")
             return
 
-        default_name = "subtitulos.str"
-        if self.video_path:
-            default_name = f"{self.video_path.stem}.str"
+        from PyQt6.QtWidgets import QDialog
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Exportar subtítulos")
+        dialog.setFixedWidth(400)
+        dialog.setObjectName("exportDialog")
+        dialog.setStyleSheet("""
+            QDialog#exportDialog {
+                background: #0b1220;
+            }
+            QLabel#exportDialogTitle {
+                color: #e2ecfa;
+                font-size: 15px;
+                font-weight: 700;
+            }
+            QLabel#exportDialogSub {
+                color: #64748b;
+                font-size: 12px;
+            }
+            QPushButton#exportCard {
+                background: #0f1928;
+                border: 1px solid #223247;
+                border-radius: 12px;
+                padding: 14px 16px;
+                text-align: left;
+                color: #d6e0ec;
+                font-size: 13px;
+                font-weight: 700;
+                min-height: 64px;
+            }
+            QPushButton#exportCard:hover {
+                background: #162436;
+                border-color: #3d6080;
+            }
+            QPushButton#exportCard:pressed {
+                background: #0a111c;
+            }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(8)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        lbl_title = QLabel("Seleccionar formato")
+        lbl_title.setObjectName("exportDialogTitle")
+        lbl_sub = QLabel(f"{len(segments)} segmentos listos para exportar")
+        lbl_sub.setObjectName("exportDialogSub")
+        layout.addWidget(lbl_title)
+        layout.addWidget(lbl_sub)
+        layout.addSpacing(10)
+
+        btn_str = QPushButton(".STR — Formato universal\n\nPara programas dedicados de subtitulado.")
+        btn_str.setObjectName("exportCard")
+
+        btn_srt = QPushButton(".SRT — Editores de video\n\nCompatible con Premiere, DaVinci Resolve y similares.")
+        btn_srt.setObjectName("exportCard")
+
+        layout.addWidget(btn_str)
+        layout.addSpacing(4)
+        layout.addWidget(btn_srt)
+
+        btn_str.clicked.connect(lambda: (dialog.accept(), self._do_export("str", segments)))
+        btn_srt.clicked.connect(lambda: (dialog.accept(), self._do_export("srt", segments)))
+
+        dialog.exec()
+
+    def _do_export(self, fmt: str, segments: list) -> None:
+        stem = self.video_path.stem if self.video_path else "subtitulos"
+        base_dir = self.video_path.parent if self.video_path else Path.cwd()
+        default_name = f"{stem}.{fmt}"
+        file_filter = "STR (*.str)" if fmt == "str" else "SRT (*.srt)"
 
         output_path_str, _ = QFileDialog.getSaveFileName(
             self,
-            "Exportar STR",
-            str((self.video_path.parent if self.video_path else Path.cwd()) / default_name),
-            "STR (*.str)",
+            f"Exportar {fmt.upper()}",
+            str(base_dir / default_name),
+            file_filter,
         )
         if not output_path_str:
             return
 
         try:
-            output_path = StrExporter.export(segments, output_path_str)
+            if fmt == "str":
+                output_path = StrExporter.export(segments, output_path_str)
+            else:
+                output_path = SrtExporter.export(segments, output_path_str)
             self.status_label.setText(f"Archivo exportado: {output_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Exportación", f"No se pudo exportar: {exc}")
