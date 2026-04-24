@@ -14,9 +14,9 @@ VSVersionInfo(
     StringFileInfo(
       [
       StringTable(
-        '040904B0',
+        '080A04B0',
         [StringStruct('CompanyName', 'EDAKZIN'),
-        StringStruct('FileDescription', 'STRX Subtitle Exporter'),
+        StringStruct('FileDescription', 'STRX - Extractor Inteligente de Subtítulos'),
         StringStruct('FileVersion', '1.1.0.0'),
         StringStruct('InternalName', 'STRX'),
         StringStruct('LegalCopyright', 'Copyright 2026 EDAKZIN'),
@@ -24,6 +24,6 @@ VSVersionInfo(
         StringStruct('ProductName', 'STRX'),
         StringStruct('ProductVersion', '1.1.0.0')])
       ]),
-    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+    VarFileInfo([VarStruct('Translation', [2058, 1200])])
   ]
 )
