@@ -6,6 +6,10 @@ import subprocess
 import sys
 from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, collect_data_files, copy_metadata
 
+# Ruta absoluta al directorio donde está este .spec (independiente del CWD)
+_SPEC_ROOT = os.path.dirname(os.path.abspath(SPEC))
+_ICON_PATH = os.path.join(_SPEC_ROOT, 'src', 'assets', 'icon.ico')
+
 # 1. METADATA CRÍTICA - PaddleX verifica en runtime qué paquetes están instalados
 #    usando importlib.metadata. Sin esto, falla con "dependency error".
 #    Lista obtenida con: paddlex.utils.deps.BASE_DEP_SPECS intersectado con el entorno.
@@ -19,7 +23,7 @@ deps_with_metadata = [
     'paddleocr', 'paddlepaddle-gpu', 'paddlex', 'paddlepaddle',
 ]
 
-datas = []
+datas = [('src/assets', 'assets')]
 binaries = []
 hiddenimports = ['cv2', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'pyspellchecker', 'winreg']
 
@@ -77,6 +81,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_ICON_PATH,
+    version='version.txt',
 )
 
 coll = COLLECT(
